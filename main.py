@@ -10,12 +10,12 @@ model, FEATURES = bundle["model"], bundle["features"]
 app = FastAPI(title="LCDI Glaucoma Screening API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten to your Vercel URL after deploying
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# All optional -> a missing field becomes NaN and the imputer fills it
+# All optional
 class PatientData(BaseModel):
     avg_dev:   Optional[float] = None
     pat_dev:   Optional[float] = None
@@ -33,6 +33,21 @@ class PatientData(BaseModel):
     iop:       Optional[float] = None
     cct:       Optional[float] = None
 
+# Readable labels for each feature
+LABELS = {
+    "avg_dev": "Mean deviation", "pat_dev": "Pattern std deviation",
+    "ght1": "Hemifield 1", "ght2": "Hemifield 2", "ght3": "Hemifield 3",
+    "ght4": "Hemifield 4", "ght5": "Hemifield 5",
+    "lost_fix": "Lost fixation", "false_pos": "False positives",
+    "false_neg": "False negatives", "lf_qual": "Fixation quality",
+    "age": "Age", "cdr": "Cup-to-disc ratio",
+    "iop": "Intraocular pressure", "cct": "Corneal thickness",
+}
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
 @app.post("/predict")
 def predict(data: PatientData):
     d = data.model_dump()
@@ -42,7 +57,30 @@ def predict(data: PatientData):
 
     proba = float(model.predict_proba(X)[0, 1])   # P(glaucoma)
     label = proba >= 0.5
+
+    # Per-feature contribution: coef * (imputed, scaled value)
+    imputed = model.named_steps["impute"].transform(X)
+    scaled  = model.named_steps["scale"].transform(imputed)
+    coefs   = model.named_steps["model"].coef_[0]
+    contribs = scaled[0] * coefs
+
+    signals = sorted(
+        (
+            {
+                "feature": f,
+                "label": LABELS[f],
+                "value": None if d[f] is None else d[f],
+                "contribution": round(float(c), 3),
+                "direction": "raises" if c > 0 else "lowers",
+            }
+            for f, c in zip(FEATURES, contribs)
+        ),
+        key=lambda s: abs(s["contribution"]),
+        reverse=True,
+    )
+
     return {
         "prediction": "Glaucoma" if label else "No glaucoma",
         "probability": round(proba, 3),
+        "signals": signals[:4],   # top 4 drivers
     }
